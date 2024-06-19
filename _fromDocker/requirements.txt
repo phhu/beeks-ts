@@ -1,0 +1,11 @@
+dash
+plotly
+pandas
+toolz
+scikit-learn
+nixtla
+prophet 
+neuralprophet 
+numpy
+mlforecast
+neuralforecast==1.6.4
