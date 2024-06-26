@@ -8,4 +8,7 @@ prophet
 neuralprophet 
 numpy
 mlforecast
-neuralforecast==1.6.4
+neuralforecast==1.6.4   # issue with latest version
+statsforecast
+utilsforecast
+mlforecast

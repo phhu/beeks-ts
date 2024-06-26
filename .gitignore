@@ -58,3 +58,4 @@ lightning_logs
 test
 *.ckpt
 beeksdash
+mlruns
