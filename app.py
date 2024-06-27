@@ -7,6 +7,10 @@ import glob
 from sklearn.preprocessing import MinMaxScaler 
 from utilsforecast.plotting import plot_series
 from urllib.parse import urlparse, parse_qsl, urlencode
+import seaborn as sns
+
+from io import BytesIO
+import base64
 
 from neuralforecast import NeuralForecast
 from neuralforecast.models import NBEATS
@@ -14,7 +18,7 @@ from neuralforecast.models import NBEATS
 
 from mlforecast import MLForecast
 from mlforecast.target_transforms import Differences
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, PoissonRegressor
 
 from nixtla import NixtlaClient
 nixtla_client = NixtlaClient(api_key = 'nixtla-tok-aCYd8dJ44XStxX5iyAxWmaBivQ1ustAC8dpj1C4ZEPI8wM1VuQ9KDyoCIibC3oX6XaUG4Q5Q9l1jQ7io')
@@ -25,6 +29,8 @@ from prophet.plot import plot_plotly
 from neuralprophet import NeuralProphet
 
 from sklearn.model_selection import train_test_split
+
+import math
 
 # df = pd.read_csv('https://raw.githubusercontent.com/plotly/datasets/master/gapminder_unfiltered.csv')
 
@@ -71,11 +77,12 @@ def filterDf(df, column):
 
 app = Dash()
 
+
 files = glob.glob("./data/beeksai/historical_market_data_stats/*.csv") + \
 glob.glob("./data/beeksai/*.csv") + \
 glob.glob("./data/*.csv")
 
-# defaultFile = "./data/TripleWitching-2024-05-06 15_56_54.csv"   # files[0]
+#defaultFile = "./data/TripleWitching-2024-05-06 15_56_54.csv"   # files[0]
 defaultFile = "./data/Packets_30days_1minGran-2024-05-06_15_33_52.csv"   # files[0]
 
 freq="H"
@@ -85,12 +92,18 @@ def update(file):
     df_scaled,scalers = scale_columns(df.copy(),columns=getColumns(df),scalers=None)
     columns = getColumns(df)
     freq = pd.infer_freq(df["ds"])
-    return df, df_scaled, columns, freq
+    df_long = pipe(df
+      ,fn.dropNonMarketHours("13:28","20:00")
+      ,lambda df: df.drop('Time', axis=1)
+      ,fn.toLong 
+      ,lambda df:df.fillna(0)    
+    )
+    return df, df_scaled, columns, freq, df_long
 
-df, df_scaled, columns, freq = update(defaultFile)
+df, df_scaled, columns, freq, df_long = update(defaultFile)
 defaultColumn = "NASDAQ_Canadian_Chix_A" # columns[0]
 
-scaling = ["0 to 1","No scaling"]
+scaling = ["No scaling","0 to 1"]
 
 app.layout = [
     dcc.Location(id='url', refresh=False),
@@ -99,9 +112,23 @@ app.layout = [
     dcc.Dropdown(files, defaultFile, id='sel-file'),   
     dcc.Dropdown(columns, defaultColumn, id='sel-column'), 
     dcc.Dropdown(scaling, scaling[0], id='sel-scaling'),   
-    
+    dcc.RangeSlider(
+        id='time-slider',
+        min=13*60,
+        max=20*60 +10,
+        value=[13.5*60],
+        marks={i*60: f'{i:02d}:00' for i in range(25)},
+        step=1
+    ),
     html.Button('Update data', id='button-update', n_clicks=0),     # , style={"display": "none"}
     #dcc.Input(id="check-rescale", type="checkbox", value="resscale"), 
+
+    html.Div([
+      dcc.Graph(id='plot-empdist-ts'),
+      # dcc.Graph(id='plot-kernal-ts' ),
+      html.Img(id='figm'),
+    ], style = {"columnCount":2}),
+
     dcc.Graph(id='plot-timeseries' ), 
     
     html.Div([
@@ -219,15 +246,56 @@ def updateColumns(file):
     global df
     global df_scaled
     global freq
+    global df_long
     # df = loadDf(file)
     # columns = getColumns(df)
-    df, df_scaled, columns, freq = update(file)
+    df, df_scaled, columns, freq, df_long = update(file)
     # print("updateColumns: " + ",".join(columns))
     return columns
 
 def getDf (scaling):
     print ("getDf: " + scaling)
     return df_scaled if scaling == "0 to 1" else df
+
+# timeslice dist
+@callback(
+    [
+      Output('plot-empdist-ts', 'figure'),
+      #Output('plot-kernal-ts', 'figure'),
+      #Output('figm', 'src'),
+    ],[
+      Input('time-slider', 'value'), 
+    ],[
+     State('sel-column', 'value'), 
+     State('sel-file', 'value'), 
+     State('sel-scaling','value') 
+    ],
+)
+def update_timeslice(time, column, file, scaling):
+    print("update_timeslice", time, column, file, scaling)
+    toTime = lambda t: str(math.floor(t/60)) + ":" + str(t % 60)
+    d = pipe(df_long
+      ,lambda df: df.set_index("ds")
+      ,lambda df: df.between_time(toTime(time[0]), toTime(time[0] + 5))
+      ,lambda df: df[df["unique_id"] == column]
+    )   
+    print ("df_long", df_long,"\nd\n", d)
+    # plot = sns.kdeplot(d["y"], bw=0.1)
+    # fig = plot.get_figure()
+    # buf = BytesIO()
+    # fig.savefig( buf, format="png")
+    # fig_data = base64.b64encode(buf.getbuffer()).decode("ascii")
+    # figm = f'data:image/png;base64,{fig_data}'
+    
+    #d_droppedNa = d0.query('y!=0')    # for distributions, assume zero not meaningful (needs UI switch)
+    return [
+      px.histogram(d, x="y", title="Empirical distribution: ",nbins=25, range_x=[0, d['y'].max() + 1])    # plot-empdist
+      #,
+      #,figm
+      #,sns.kdeplot(d["y"], bw=0.1)
+    ] 
+
+
 
 # DATA SUMMARY
 @callback(
@@ -377,10 +445,11 @@ def update_mlforecast(n_clicks, column, file, scaling):
     f = 24*7
       
     fcst = MLForecast(
-        models=LinearRegression(),
+        # models=LinearRegression(),
+        models=PoissonRegressor(),
         freq=freq,  # our serie has a monthly frequency
         lags=[f,f*2,f*3,f*4],
-        target_transforms=[Differences([f])],
+        #target_transforms=[Differences([f])],
     )
     fcst.fit(d0)
     preds = fcst.predict(f*3)
@@ -494,8 +563,6 @@ def update_forcasts(n_clicks, column, file, scaling):
       nixtla_client.plot(d, fcst_df, level=[80,90] ,engine='plotly'),
     ]      
     
- 
-
 # app.css.append_css({
 #     'external_url': 'https://codepen.io/chriddyp/pen/bWLwgP.css'
 # })
